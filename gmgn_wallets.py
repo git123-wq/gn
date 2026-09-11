@@ -382,11 +382,7 @@ def run_job():
             print(f"backup failed {e}", flush=True)
 
     def fmt_row(addr: str, row: dict) -> str:
-        wr = num(row, "winrate_7d", "winrate", "win_rate")
-        if wr > 1:
-            wr = wr / 100.0
-        pnl = num(row, "realized_profit_7d", "pnl_7d", "realized_profit")
-        tx = int(num(row, "buy_7d", "txs_7d", "tx_count_7d", "buy"))
+        wr, tx, pnl = stats_of(row)
         return f"`{addr}` · wr {wr:.0%} · pnl ${pnl:,.0f} · {tx} buys/7d"
 
     for chain, rows in picked.items():
