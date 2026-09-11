@@ -159,41 +159,80 @@ def merge_patch_alert(alert_id: str, new_addrs: list[str]):
     return name, added, len(subjects), existed
 
 
+def _rows_from(raw) -> tuple[list, str | None]:
+    data = raw.get("data") if isinstance(raw, dict) else raw
+    cursor = None
+    rows = []
+    if isinstance(data, dict):
+        rows = data.get("rank") or data.get("list") or data.get("wallets") or []
+        cursor = (
+            data.get("next")
+            or data.get("cursor")
+            or data.get("next_cursor")
+            or data.get("next_page_token")
+        )
+    elif isinstance(data, list):
+        rows = data
+    if isinstance(raw, dict) and not cursor:
+        cursor = raw.get("next") or raw.get("cursor") or raw.get("next_page_token")
+    return rows if isinstance(rows, list) else [], (str(cursor) if cursor else None)
+
+
 def gmgn_rank(chain: str, tag: str) -> list[dict]:
     url = f"{GMGN}/rank/{chain}/wallets/7d"
+    out: list[dict] = []
+    seen_addr: set[str] = set()
+    cursor = None
     last = None
-    for i in range(5):
-        try:
-            r = requests.get(
-                url,
-                headers=HEADERS,
-                params={k: v for k, v in {
-                    "tag": tag or None,
-                    "orderby": "pnl_7d",
-                    "direction": "desc",
-                    "limit": RANK_LIMIT,
-                }.items() if v},
-                timeout=25,
-            )
-            if r.status_code in {429, 500, 502, 503}:
-                time.sleep(2 * (i + 1))
-                last = f"HTTP {r.status_code}"
+    for page in range(1, 6):
+        params = {
+            "orderby": "pnl_7d",
+            "direction": "desc",
+            "limit": 100,
+            "page": page,
+        }
+        if tag:
+            params["tag"] = tag
+        if cursor:
+            params["cursor"] = cursor
+        ok = False
+        for i in range(4):
+            try:
+                r = requests.get(url, headers=HEADERS, params=params, timeout=25)
+                if r.status_code in {429, 500, 502, 503}:
+                    time.sleep(2 * (i + 1))
+                    last = f"HTTP {r.status_code}"
+                    continue
+                if r.status_code >= 400:
+                    raise RuntimeError(
+                        f"GMGN {chain}/{tag} HTTP {r.status_code} {r.text[:180]}"
+                    )
+                rows, cursor = _rows_from(r.json())
+                ok = True
+                break
+            except Exception as e:
+                last = e
+                time.sleep(1.5 * (i + 1))
+        if not ok:
+            if out:
+                break
+            raise RuntimeError(f"GMGN scrape failed {chain}/{tag}: {last}")
+        new = 0
+        for row in rows:
+            if not isinstance(row, dict):
                 continue
-            if r.status_code >= 400:
-                raise RuntimeError(f"GMGN {chain}/{tag} HTTP {r.status_code} {r.text[:180]}")
-            raw = r.json()
-            data = raw.get("data") if isinstance(raw, dict) else raw
-            if isinstance(data, dict):
-                rows = data.get("rank") or data.get("list") or data.get("wallets") or []
-            elif isinstance(data, list):
-                rows = data
-            else:
-                rows = []
-            return (rows if isinstance(rows, list) else [])[:RANK_LIMIT]
-        except Exception as e:
-            last = e
-            time.sleep(2 * (i + 1))
-    raise RuntimeError(f"GMGN scrape failed {chain}/{tag}: {last}")
+            a = addr_of(row).lower()
+            if not a or a in seen_addr:
+                continue
+            seen_addr.add(a)
+            out.append(row)
+            new += 1
+            if len(out) >= RANK_LIMIT:
+                return out
+        if new == 0:
+            break
+        time.sleep(0.4)
+    return out
 
 
 def num(row: dict, *keys) -> float:
