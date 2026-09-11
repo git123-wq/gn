@@ -178,46 +178,38 @@ def _rows_from(raw) -> tuple[list, str | None]:
     return rows if isinstance(rows, list) else [], (str(cursor) if cursor else None)
 
 
+def _fetch_rank(chain: str, tag: str, period: str) -> list[dict]:
+    url = f"{GMGN}/rank/{chain}/wallets/{period}"
+    order = "pnl_7d" if period == "7d" else "pnl_30d"
+    params = {"orderby": order, "direction": "desc", "limit": 100}
+    if tag:
+        params["tag"] = tag
+    last = None
+    for i in range(4):
+        try:
+            r = requests.get(url, headers=HEADERS, params=params, timeout=25)
+            if r.status_code in {429, 500, 502, 503}:
+                time.sleep(2 * (i + 1))
+                last = f"HTTP {r.status_code}"
+                continue
+            if r.status_code >= 400:
+                raise RuntimeError(
+                    f"GMGN {chain}/{tag or 'all'}/{period} HTTP {r.status_code}"
+                )
+            rows, _ = _rows_from(r.json())
+            return rows
+        except Exception as e:
+            last = e
+            time.sleep(1.5 * (i + 1))
+    raise RuntimeError(f"GMGN scrape failed {chain}/{tag or 'all'}/{period}: {last}")
+
+
 def gmgn_rank(chain: str, tag: str) -> list[dict]:
-    url = f"{GMGN}/rank/{chain}/wallets/7d"
     out: list[dict] = []
     seen_addr: set[str] = set()
-    cursor = None
-    last = None
-    for page in range(1, 6):
-        params = {
-            "orderby": "pnl_7d",
-            "direction": "desc",
-            "limit": 100,
-            "page": page,
-        }
-        if tag:
-            params["tag"] = tag
-        if cursor:
-            params["cursor"] = cursor
-        ok = False
-        for i in range(4):
-            try:
-                r = requests.get(url, headers=HEADERS, params=params, timeout=25)
-                if r.status_code in {429, 500, 502, 503}:
-                    time.sleep(2 * (i + 1))
-                    last = f"HTTP {r.status_code}"
-                    continue
-                if r.status_code >= 400:
-                    raise RuntimeError(
-                        f"GMGN {chain}/{tag} HTTP {r.status_code} {r.text[:180]}"
-                    )
-                rows, cursor = _rows_from(r.json())
-                ok = True
-                break
-            except Exception as e:
-                last = e
-                time.sleep(1.5 * (i + 1))
-        if not ok:
-            if out:
-                break
-            raise RuntimeError(f"GMGN scrape failed {chain}/{tag}: {last}")
-        new = 0
+    for period in ("7d", "30d"):
+        rows = _fetch_rank(chain, tag, period)
+        added = 0
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -226,12 +218,16 @@ def gmgn_rank(chain: str, tag: str) -> list[dict]:
                 continue
             seen_addr.add(a)
             out.append(row)
-            new += 1
+            added += 1
             if len(out) >= RANK_LIMIT:
-                return out
-        if new == 0:
+                break
+        print(
+            f"gmgn {chain}/{tag or 'all'}/{period} page={len(rows)} unique+={added} total={len(out)}",
+            flush=True,
+        )
+        if len(out) >= RANK_LIMIT:
             break
-        time.sleep(0.4)
+        time.sleep(0.3)
     return out
 
 
