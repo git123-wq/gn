@@ -261,32 +261,69 @@ def tag_blob(row: dict) -> str:
     return str(tags).lower()
 
 
+def flatten(row: dict, prefix: str = "") -> dict:
+    out = {}
+    for k, v in (row or {}).items():
+        key = f"{prefix}{k}".lower()
+        if isinstance(v, dict):
+            out.update(flatten(v, key + "_"))
+        else:
+            out[key] = v
+            out[str(k).lower()] = v
+    return out
+
+
+def stats_of(row: dict) -> tuple[float, int, float]:
+    f = flatten(row)
+    wr = num(
+        f,
+        "winrate_7d",
+        "winrate",
+        "win_rate",
+        "winrate_7day",
+        "win_rate_7d",
+    )
+    if wr > 1:
+        wr = wr / 100.0
+    tx = int(
+        num(
+            f,
+            "buy_7d",
+            "txs_7d",
+            "tx_count_7d",
+            "buy",
+            "txs",
+            "txs_buy_7d",
+            "buy_count_7d",
+        )
+    )
+    pnl = num(
+        f,
+        "realized_profit_7d",
+        "realized_profit",
+        "profit_7d",
+        "realized_profit_7day",
+        "realized_pnl_7d",
+        "usd_profit_7d",
+    )
+    if pnl <= 0:
+        raw = num(f, "pnl_7d", "pnl")
+        if raw > 50:
+            pnl = raw
+    return wr, tx, pnl
+
+
 def keep(row: dict) -> tuple[bool, str]:
     blob = tag_blob(row)
     if any(t in blob for t in SKIP_TAGS):
         return False, "tag"
-    wr = num(row, "winrate_7d", "winrate", "win_rate", "winrate_7day")
-    if wr > 1:
-        wr = wr / 100.0
-    tx = int(
-        num(row, "buy_7d", "txs_7d", "tx_count_7d", "buy", "txs", "txs_buy_7d")
-    )
-    pnl = num(
-        row,
-        "realized_profit_7d",
-        "pnl_7d",
-        "realized_profit",
-        "profit_7d",
-        "realized_profit_7day",
-    )
-    if wr and wr < MIN_WIN:
+    wr, tx, pnl = stats_of(row)
+    if wr < MIN_WIN:
         return False, "win"
-    if tx and (tx < MIN_TX or tx > MAX_TX):
+    if tx < MIN_TX or tx > MAX_TX:
         return False, "tx"
-    if pnl and (pnl < MIN_PNL or pnl > MAX_PNL):
+    if pnl < MIN_PNL or pnl > MAX_PNL:
         return False, "pnl"
-    if not wr and not tx and not pnl:
-        return True, "thin"
     return True, "ok"
 
 
