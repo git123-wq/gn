@@ -32,16 +32,15 @@ FORCE_RUN = os.environ.get("FORCE_RUN", "").strip().lower() in {
 RUN_HOUR = int(os.environ.get("RUN_HOUR", "20"))
 RUN_MINUTE = int(os.environ.get("RUN_MINUTE", "15"))
 MAX_ADD = int(os.environ.get("MAX_ADD", "30"))
-RANK_LIMIT = int(os.environ.get("RANK_LIMIT", "30"))
-MIN_WIN = float(os.environ.get("MIN_WIN", "0.45"))
-MIN_TX = int(os.environ.get("MIN_TX", "8"))
-MAX_TX = int(os.environ.get("MAX_TX", "60"))
-MIN_PNL = float(os.environ.get("MIN_PNL_USD", "3000"))
-MAX_PNL = float(os.environ.get("MAX_PNL_USD", "120000"))
+RANK_LIMIT = int(os.environ.get("RANK_LIMIT", "200"))
+MIN_WIN = float(os.environ.get("MIN_WIN", "0.35"))
+MIN_TX = int(os.environ.get("MIN_TX", "4"))
+MAX_TX = int(os.environ.get("MAX_TX", "120"))
+MIN_PNL = float(os.environ.get("MIN_PNL_USD", "500"))
+MAX_PNL = float(os.environ.get("MAX_PNL_USD", "250000"))
 TAGS = [
     x.strip()
-    for x in os.environ.get("GMGN_TAGS", "smart_degen,launchpad_smart").split(",")
-    if x.strip()
+    for x in os.environ.get("GMGN_TAGS", "smart_degen,launchpad_smart,").split(",")
 ]
 SKIP_TAGS = {
     x.strip().lower()
@@ -168,12 +167,12 @@ def gmgn_rank(chain: str, tag: str) -> list[dict]:
             r = requests.get(
                 url,
                 headers=HEADERS,
-                params={
-                    "tag": tag,
+                params={k: v for k, v in {
+                    "tag": tag or None,
                     "orderby": "pnl_7d",
                     "direction": "desc",
                     "limit": RANK_LIMIT,
-                },
+                }.items() if v},
                 timeout=25,
             )
             if r.status_code in {429, 500, 502, 503}:
@@ -208,6 +207,9 @@ def num(row: dict, *keys) -> float:
 
 
 def addr_of(row: dict) -> str:
+    w = row.get("wallet")
+    if isinstance(w, dict):
+        row = {**row, **w}
     return str(
         row.get("address")
         or row.get("wallet_address")
@@ -224,28 +226,33 @@ def tag_blob(row: dict) -> str:
     return str(tags).lower()
 
 
-def keep(row: dict) -> bool:
+def keep(row: dict) -> tuple[bool, str]:
     blob = tag_blob(row)
     if any(t in blob for t in SKIP_TAGS):
-        return False
-    wr = num(row, "winrate_7d", "winrate", "win_rate")
+        return False, "tag"
+    wr = num(row, "winrate_7d", "winrate", "win_rate", "winrate_7day")
     if wr > 1:
         wr = wr / 100.0
-    tx = int(num(row, "buy_7d", "txs_7d", "tx_count_7d", "buy"))
+    tx = int(
+        num(row, "buy_7d", "txs_7d", "tx_count_7d", "buy", "txs", "txs_buy_7d")
+    )
     pnl = num(
         row,
         "realized_profit_7d",
         "pnl_7d",
         "realized_profit",
         "profit_7d",
+        "realized_profit_7day",
     )
-    if wr < MIN_WIN:
-        return False
-    if tx < MIN_TX or tx > MAX_TX:
-        return False
-    if pnl < MIN_PNL or pnl > MAX_PNL:
-        return False
-    return True
+    if wr and wr < MIN_WIN:
+        return False, "win"
+    if tx and (tx < MIN_TX or tx > MAX_TX):
+        return False, "tx"
+    if pnl and (pnl < MIN_PNL or pnl > MAX_PNL):
+        return False, "pnl"
+    if not wr and not tx and not pnl:
+        return True, "thin"
+    return True, "ok"
 
 
 def post(webhook: str, title: str, desc: str, color: int = 0x00C2A8):
@@ -272,28 +279,41 @@ def run_job():
     seen = load_seen()
     picked: dict[str, list[tuple[str, dict]]] = {"sol": [], "robinhood": []}
     errors = []
+    stats: list[str] = []
     for chain in CHAINS:
         bucket = "robinhood" if "robin" in chain else "sol"
         for tag in TAGS:
             try:
                 rows = gmgn_rank(chain, tag)
-                print(f"gmgn {chain}/{tag} rows={len(rows)}", flush=True)
+                print(f"gmgn {chain}/{tag or 'all'} rows={len(rows)}", flush=True)
             except Exception as e:
-                errors.append(f"{chain}/{tag}: {e}")
-                print(f"ERROR {chain}/{tag} {e}", flush=True)
+                errors.append(f"{chain}/{tag or 'all'}: {e}")
+                print(f"ERROR {chain}/{tag or 'all'} {e}", flush=True)
                 continue
+            reasons = {"tag": 0, "win": 0, "tx": 0, "pnl": 0, "noaddr": 0, "seen": 0, "ok": 0, "thin": 0}
             for row in rows:
                 if not isinstance(row, dict):
                     continue
                 addr = addr_of(row)
-                if not addr or addr.lower() in seen:
+                if not addr:
+                    reasons["noaddr"] += 1
                     continue
-                if not keep(row):
+                if addr.lower() in seen:
+                    reasons["seen"] += 1
+                    continue
+                ok, why = keep(row)
+                reasons[why] = reasons.get(why, 0) + 1
+                if not ok:
                     continue
                 picked[bucket].append((addr, row))
                 seen.add(addr.lower())
                 if len(picked[bucket]) >= MAX_ADD:
                     break
+            stats.append(
+                f"{chain}/{tag or 'all'}: fetched {len(rows)} · kept {reasons.get('ok',0)+reasons.get('thin',0)} · "
+                f"skip win={reasons['win']} tx={reasons['tx']} pnl={reasons['pnl']} "
+                f"tag={reasons['tag']} noaddr={reasons['noaddr']}"
+            )
             if len(picked[bucket]) >= MAX_ADD:
                 break
 
@@ -306,6 +326,13 @@ def run_job():
         )
         return
 
+    if stats or errors:
+        post(
+            GMGN_WEBHOOK,
+            "GMGN filter report",
+            "\n".join(stats + errors) or "no fetches",
+            0x5865F2,
+        )
     save_seen(seen)
 
     if BACKUP_WEBHOOK and KEY and PATCH_ALERTS:
