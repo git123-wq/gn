@@ -32,8 +32,8 @@ FORCE_RUN = os.environ.get("FORCE_RUN", "").strip().lower() in {
 RUN_HOUR = int(os.environ.get("RUN_HOUR", "20"))
 RUN_MINUTE = int(os.environ.get("RUN_MINUTE", "15"))
 MAX_ADD = int(os.environ.get("MAX_ADD", "30"))
-RANK_LIMIT = int(os.environ.get("RANK_LIMIT", "200"))
-MIN_WIN = float(os.environ.get("MIN_WIN", "0.35"))
+RANK_LIMIT = int(os.environ.get("RANK_LIMIT", "500"))
+MIN_WIN = float(os.environ.get("MIN_WIN", "0.49"))
 MIN_TX = int(os.environ.get("MIN_TX", "4"))
 MAX_TX = int(os.environ.get("MAX_TX", "120"))
 MIN_PNL = float(os.environ.get("MIN_PNL_USD", "500"))
@@ -178,9 +178,8 @@ def _rows_from(raw) -> tuple[list, str | None]:
     return rows if isinstance(rows, list) else [], (str(cursor) if cursor else None)
 
 
-def _fetch_rank(chain: str, tag: str, period: str) -> list[dict]:
+def _fetch_rank(chain: str, tag: str, period: str, order: str) -> list[dict]:
     url = f"{GMGN}/rank/{chain}/wallets/{period}"
-    order = "pnl_7d" if period == "7d" else "pnl_30d"
     params = {"orderby": order, "direction": "desc", "limit": 100}
     if tag:
         params["tag"] = tag
@@ -207,8 +206,9 @@ def _fetch_rank(chain: str, tag: str, period: str) -> list[dict]:
 def gmgn_rank(chain: str, tag: str) -> list[dict]:
     out: list[dict] = []
     seen_addr: set[str] = set()
-    for period in ("7d", "30d"):
-        rows = _fetch_rank(chain, tag, period)
+    for period in ("1d", "7d", "30d"):
+        order = {"1d": "pnl_1d", "7d": "pnl_7d", "30d": "pnl_30d"}[period]
+        rows = _fetch_rank(chain, tag, period, order)
         added = 0
         for row in rows:
             if not isinstance(row, dict):
@@ -375,10 +375,10 @@ def run_job():
                     continue
                 ok, why = keep(row)
                 reasons[why] = reasons.get(why, 0) + 1
+                seen.add(addr.lower())
                 if not ok:
                     continue
                 picked[bucket].append((addr, row))
-                seen.add(addr.lower())
                 if len(picked[bucket]) >= MAX_ADD:
                     break
             stats.append(
