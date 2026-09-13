@@ -57,6 +57,8 @@ SOL_ALERTS = [
     for x in (
         os.environ.get("SOL_BUY_ALERT_ID", "").strip(),
         os.environ.get("SOL_SELL_ALERT_ID", "").strip(),
+        os.environ.get("SOL_100_BUY_ALERT_ID", "").strip(),
+        os.environ.get("SOL_100_SELL_ALERT_ID", "").strip(),
     )
     if x
 ]
